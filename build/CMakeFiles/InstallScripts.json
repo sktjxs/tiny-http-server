@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/zjx12345/projects/tiny-http-server/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

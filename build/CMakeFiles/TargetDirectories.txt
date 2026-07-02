@@ -1,0 +1,5 @@
+/home/zjx12345/projects/tiny-http-server/build/CMakeFiles/server_v0.dir
+/home/zjx12345/projects/tiny-http-server/build/CMakeFiles/server_v1.dir
+/home/zjx12345/projects/tiny-http-server/build/CMakeFiles/server_v2.dir
+/home/zjx12345/projects/tiny-http-server/build/CMakeFiles/edit_cache.dir
+/home/zjx12345/projects/tiny-http-server/build/CMakeFiles/rebuild_cache.dir
