@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility> // for std::exchange
 
-// ==================== RAII Socket 封装 ====================
+
 class Socket {
 private:
     int fd_;
@@ -36,13 +36,12 @@ public:
     bool valid() const noexcept { return fd_ >= 0; }
 };
 
-// ==================== 业务逻辑区域 ====================
 Socket createServerSocket(int port) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         throw std::runtime_error("socket() failed: " + std::string(strerror(errno)));
     }
-    // 立即用 RAII 接管，后续任何异常都会自动 close
+    
     Socket sock(fd);
 
     int opt = 1;
@@ -63,7 +62,7 @@ Socket createServerSocket(int port) {
         throw std::runtime_error("listen() failed: " + std::string(strerror(errno)));
     }
 
-    return sock; // 移动语义返回，零拷贝
+    return sock; 
 }
 
 ssize_t safeRecv(int fd, char* buf, size_t maxSize) {
@@ -82,7 +81,7 @@ bool safeSend(int fd, const char* buf, size_t len) {
     return true;
 }
 
-void handleClient(Socket client) { // ✅ 按值接收，接管客户端 socket 所有权
+void handleClient(Socket client) { 
     char buf[1024];
     while (true) {
         ssize_t len = safeRecv(client.get(), buf, sizeof(buf));
@@ -106,10 +105,8 @@ void handleClient(Socket client) { // ✅ 按值接收，接管客户端 socket 
             break;
         }
     }
-    // ✅ client 在函数返回时自动析构 → close(c_fd)
 }
 
-// ==================== Main ====================
 int main() {
     try {
         Socket server = createServerSocket(8080);
@@ -121,7 +118,6 @@ int main() {
                 std::cerr << "accept error: " << strerror(errno) << "\n";
                 continue;
             }
-            // ✅ 构造临时 Socket 对象，传入 handleClient 后自动管理生命周期
             handleClient(Socket(raw_fd));
         }
     } catch (const std::exception& e) {
@@ -130,5 +126,4 @@ int main() {
     }
 
     return EXIT_SUCCESS;
-    // ✅ server 在此处自动析构 → close(s_fd)
 }

@@ -1,4 +1,4 @@
-// server_v5.cpp
+// server_v3.cpp
 // Reactor 模型：单线程 epoll（EPOLLONESHOT）+ 线程池
 //
 // 核心思想：
@@ -110,7 +110,7 @@ public:
     }
 };
 
-void handleClient(int clientFd)  // [FIX] 原: handleClient(int clienFd) → 参数名拼写错误，与函数体内部使用不一致
+void handleClient(int clientFd)  
 {
     char buf[4096];
     std::string request;
