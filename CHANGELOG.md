@@ -2,7 +2,7 @@
 
 | 版本 | 关键词 |
 |------|--------|
-| v0–v2 | 基础 socket server：`bind`/`listen`/`accept`，返回 HTTP 响应 |
+| v0–v2 | socket 基础 + RAII 封装 → HTTP 协议与路由（阻塞）→ 为 epoll 打基础 |
 | v3 | `epoll` + 线程池 + `EPOLLONESHOT`（单 Reactor 雏形） |
 | v4 | keep-alive 长连接 |
 | v5 | 连接超时 + 动态 `epoll_wait` timeout |
@@ -13,8 +13,12 @@
 ---
 
 ## v0–v2 — 基础阶段
-
-- 实现最简 socket server：`bind` / `listen` / `accept`，向客户端写回 HTTP 响应。
+- **v0 · socket 连通性 + RAII 雏形**：先用 `socket/bind/listen/accept` 跑通一个**回显服务器**（收到什么、转大写、发回去），目的不是业务，而是**验证 socket 流程**，并落地第一个 RAII 类 `Socket`：
+  - 析构自动 `close`；**禁拷贝**防 double-close；**移动语义**用 `std::exchange` 转移 fd 所有权。
+  - `createServerSocket` 里 `socket()` 一成功**立刻**交给 RAII 接管，之后任何 `throw` 都会自动 close → **异常安全**。
+  - 面试金句：*"fd 是独占资源，所以禁拷贝、允许移动；用 `exchange` 一行完成'拿走新值、留下 -1'，比手写 if 更安全。"*
+- **v1 · 在 socket 上实现 HTTP 协议**：不再回显，而是**解析请求行**（`parse_path` 取 path）、**构造响应**（`build_response` 拼状态行+头+`Content-Length`+body）、**路由分发**（`route`：`/`、`/hello`、`/api/time`、404，分别返回 html / text / json）。顺手用上 C++20 `std::format` 和原始字符串 `R"(...)"`。
+- **v2 · 工程化收尾**：把裸 fd 的散落 `close` 收敛进对象生命周期，保证每条退出路径都不泄漏。
 ## v3 — 单 Reactor + 线程池（EPOLLONESHOT）
 
 核心思想：
