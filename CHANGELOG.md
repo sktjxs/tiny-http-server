@@ -1,10 +1,5 @@
 # 版本演进 · tiny-http-server
 
-> 一份按版本整理的实现笔记，方便复习与面试。
-> 顶部是「一句话速览」，下面是「分版详解」。
-
-## 一句话速览
-
 | 版本 | 关键词 |
 |------|--------|
 | v0–v2 | 基础 socket server：`bind`/`listen`/`accept`，返回 HTTP 响应 |
@@ -21,7 +16,6 @@
 
 - 实现最简 socket server：`bind` / `listen` / `accept`，向客户端写回 HTTP 响应。
 - 在 git 中这三版合并为一条提交 `v0-v2: socket server with HTTP response`，未再细分。
-- *（若你想把 v0 / v1 / v2 拆成三节，把每版做了啥发我，我帮你补。）*
 
 ## v3 — 单 Reactor + 线程池（EPOLLONESHOT）
 
