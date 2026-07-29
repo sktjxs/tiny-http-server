@@ -15,8 +15,6 @@
 ## v0–v2 — 基础阶段
 
 - 实现最简 socket server：`bind` / `listen` / `accept`，向客户端写回 HTTP 响应。
-- 在 git 中这三版合并为一条提交 `v0-v2: socket server with HTTP response`，未再细分。
-
 ## v3 — 单 Reactor + 线程池（EPOLLONESHOT）
 
 核心思想：
@@ -83,10 +81,3 @@
 - `EPOLLOUT`：可写事件，保证大响应完整发送。
 - 信号处理：`SIGINT` / `SIGTERM` 优雅退出，flush 残留日志。
 
-v8 需掌握的 5 个面试问答：
-
-- **Q1 inputBuffer**：`Connection` 成员，跨 `epoll_wait` 存活，分包不丢。
-- **Q2 outputBuffer**：`send` 没发完存 buffer + `EPOLLOUT` 继续发。
-- **Q3 生命周期**：`shared_ptr` + `connections_` map，回调持有引用防析构。
-- **Q4 LT / ET**：LT 模式，注释说明选择理由。
-- **Q5 优雅退出**：signal handler + `stop()` flush 日志。
