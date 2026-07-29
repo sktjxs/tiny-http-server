@@ -1,0 +1,30 @@
+[20260726 23:02:29.699180] [INFO ] [tid:21622] server_v7.cpp:475 ===== server v9 starting =====
+[20260726 23:02:29.699279] [INFO ] [tid:21622] server_v7.cpp:501 listening on :8080
+[20260726 23:02:29.699362] [INFO ] [tid:21624] server_v7.cpp:321 sub-reactor 0 started
+[20260726 23:02:29.699399] [INFO ] [tid:21625] server_v7.cpp:321 sub-reactor 1 started
+[20260726 23:02:29.699455] [INFO ] [tid:21626] server_v7.cpp:321 sub-reactor 2 started
+[20260726 23:02:29.699487] [INFO ] [tid:21622] server_v7.cpp:511 4 sub-reactors started
+[20260726 23:02:29.699493] [INFO ] [tid:21622] server_v7.cpp:523 main reactor ready, waiting for connections...
+[20260726 23:02:29.699495] [INFO ] [tid:21627] server_v7.cpp:321 sub-reactor 3 started
+[20260726 23:02:43.149467] [INFO ] [tid:21622] server_v7.cpp:547 connect 127.0.0.1:42232 -> sub 0
+[20260726 23:02:43.149547] [INFO ] [tid:21624] server_v7.cpp:351 sub 0 took fd 14
+[20260726 23:02:43.149591] [INFO ] [tid:21624] server_v7.cpp:422 sub 0 req #1
+[20260727 16:51:52.911650] [INFO ] [tid:1191] server_v8.cpp:810 ===== server v10 starting =====
+[20260727 16:51:52.911723] [INFO ] [tid:1191] server_v8.cpp:836 listening on :8080
+[20260727 16:51:52.911801] [INFO ] [tid:1193] server_v8.cpp:680 sub-reactor 0 started
+[20260727 16:51:52.911870] [INFO ] [tid:1191] server_v8.cpp:846 4 sub-reactors started
+[20260727 16:51:52.911876] [INFO ] [tid:1191] server_v8.cpp:858 main reactor ready, waiting for connections...
+[20260727 16:51:52.911847] [INFO ] [tid:1195] server_v8.cpp:680 sub-reactor 2 started
+[20260727 16:51:52.911857] [INFO ] [tid:1194] server_v8.cpp:680 sub-reactor 1 started
+[20260727 16:51:52.911888] [INFO ] [tid:1196] server_v8.cpp:680 sub-reactor 3 started
+[20260727 16:51:58.080041] [INFO ] [tid:1191] server_v8.cpp:883 connect 127.0.0.1:42936 -> sub 0
+[20260727 16:51:58.080203] [INFO ] [tid:1193] server_v8.cpp:431 Connection created fd=14
+[20260727 16:51:58.080222] [INFO ] [tid:1193] server_v8.cpp:717 sub 0 took fd 14
+[20260727 16:51:58.080287] [INFO ] [tid:1193] server_v8.cpp:555 fd=14 closed
+[20260727 16:51:58.080291] [INFO ] [tid:1193] server_v8.cpp:440 Connection destroyed fd=14
+[20260727 16:52:24.514746] [INFO ] [tid:1191] server_v8.cpp:895 shutting down...
+[20260727 16:52:24.514866] [INFO ] [tid:1193] server_v8.cpp:759 sub-reactor 0 stopped
+[20260727 16:52:24.515024] [INFO ] [tid:1194] server_v8.cpp:759 sub-reactor 1 stopped
+[20260727 16:52:24.515107] [INFO ] [tid:1195] server_v8.cpp:759 sub-reactor 2 stopped
+[20260727 16:52:24.515205] [INFO ] [tid:1196] server_v8.cpp:759 sub-reactor 3 stopped
+[20260727 16:52:24.515260] [INFO ] [tid:1191] server_v8.cpp:901 ===== server v10 shutdown =====
