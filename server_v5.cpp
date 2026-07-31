@@ -2,13 +2,18 @@
 // Reactor + 线程池 + Keep-Alive + 定时器（超时连接清理）
 //
 // 相比 v4 的核心改动：
-//   1. 每个连接有超时时间（默认 60s 无活动自动关闭）
+//   1. 每个连接有超时时间（默认 5s 无活动自动关闭）
 //   2. epoll_wait 的 timeout 不再是 -1，而是最近过期连接的剩余毫秒
 //   3. epoll_wait 返回后调用 tick()，清理所有超时连接
 //   4. 客户端每次收发数据都刷新超时
 //
 // 编译: g++ -o server_v5 server_v5.cpp -std=c++17 -pthread
 // 测试: curl http://localhost:8080
+
+//constexpr 让编译器在编译阶段就把值算好，运行时零开销，同时保留类型安全。
+// 凡是"编译期就能确定"的常量、函数，都优先用 constexpr 而非 const 或 #define。
+
+
 
 #include <iostream>
 #include <cstring>
@@ -29,107 +34,125 @@
 #include <functional>
 #include <vector>
 #include <string>
+#include <algorithm>
 
-using Clock     = std::chrono::steady_clock;
+using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 
-// ============== 工具函数 ==============
 
 int setNonBlocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+   int g_flag = fcntl(fd , F_GETFL , 0);
+   if(g_flag < 0)
+   {
+        perror("F_GETFL error!");
+        return -1;
+   }
+   int s_flag = fcntl(fd , F_SETFL , g_flag | O_NONBLOCK);
+   if(s_flag < 0)
+   {
+        perror("F_SETFL error!");
+        return -1;
+   }
+   return s_flag;
 }
 
 void addEpollFd(int epFd, int fd) {
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.fd = fd;
-    epoll_ctl(epFd, EPOLL_CTL_ADD, fd, &ev);
+    ev.events = EPOLLIN | EPOLLONESHOT;
+    epoll_ctl(epFd , EPOLL_CTL_ADD , fd , &ev);
 }
 
-void resetEpollFd(int epFd, int fd) {
+void reSetEpollFd(int epFd, int fd) {
     epoll_event ev{};
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.fd = fd;
-    epoll_ctl(epFd, EPOLL_CTL_MOD, fd, &ev);
+    epoll_ctl(epFd , EPOLL_CTL_MOD , fd , &ev);
 }
 
-// ============== 定时器管理器 ==============
-
-class TimerManager {
+class timeManager
+{
+private:
+    std::unordered_map<int , TimePoint> timers_;
+    std::mutex mutex_;
 public:
-    // 添加或刷新一个连接的超时时间
-    void refresh(int fd, int timeoutSec) {
+    void reFresh(int fd , int timeOutSec)
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        timers_[fd] = Clock::now() + std::chrono::seconds(timeoutSec);
+        timers_[fd] = Clock::now() + std::chrono::seconds(timeOutSec);
     }
 
-    // 连接关闭时移除定时器
-    void remove(int fd) {
+    void reMove(int fd)
+    {
         std::lock_guard<std::mutex> lock(mutex_);
         timers_.erase(fd);
     }
 
-    // 返回最近过期连接的剩余毫秒数，给 epoll_wait 当 timeout 用
-    // 没有连接返回 -1（无限等待）
-    int nextTimeoutMs() {
+    int nextTimeOutMs()//返回距离过期时间最近的那个fd，还需要多长时间过期
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (timers_.empty()) return -1;
+        if(timers_.empty()) return -1;
 
-        TimePoint earliest = TimePoint::max();
-        for (auto& [fd, expire] : timers_) {
-            if (expire < earliest) earliest = expire;
+        TimePoint earlist = TimePoint::max();
+        for(auto& [fd , expire]:timers_)
+        {
+            if(expire < earlist) earlist = expire;
         }
-
-        int ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            earliest - Clock::now()
-        ).count();
-        return ms > 0 ? ms : 0;  // 已过期返回 0，立即返回
+        int ms = std::chrono::duration_cast<std::chrono::milliseconds>(earlist - Clock::now()).count();
+        return ms > 0 ? ms : 0;
     }
 
-    // 检查并清理所有超时连接，返回需要关闭的 fd 列表
-    std::vector<int> tick() {
+    std::vector<int> tick()
+    {
         std::vector<int> expired;
         std::lock_guard<std::mutex> lock(mutex_);
         auto now = Clock::now();
-        for (auto it = timers_.begin(); it != timers_.end(); ) {
-            if (it->second <= now) {
+        for(auto it = timers_.begin(); it != timers_.end();)
+        {
+            if(it->second <= now)
+            {
                 expired.push_back(it->first);
                 it = timers_.erase(it);
-            } else {
+            }else
+            {
                 ++it;
             }
         }
         return expired;
     }
-
-private:
-    std::unordered_map<int, TimePoint> timers_;  // fd → 过期时间
-    std::mutex                         mutex_;   // 主线程和工作线程都会访问
 };
 
-// 全局定时器
-TimerManager g_timer;
-constexpr int TIMEOUT_SEC = 60;  // 连接超时时间（测试时可改小到 5）
+timeManager g_timer; // 全局定时器
+constexpr int TIMEOUT_SEC = 5;// 连接超时时间（测试时可改小到 5）
 
-// ============== 线程池 ==============
 
 using Task = std::function<void()>;
 
-class ThreadPool {
+class threadPool
+{
+private:
+    std::mutex mutex_;
+    std::vector<std::thread> workers_;
+    std::condition_variable cond_;
+    std::queue<Task> tasks_;
+    bool symbol_;
 public:
-    explicit ThreadPool(size_t numThreads) : stop_(false) {
-        for (size_t i = 0; i < numThreads; ++i) {
-            workers_.emplace_back([this] {
-                for (;;) {
+    explicit threadPool(size_t nums) noexcept : symbol_(false)
+    {
+        for(size_t i = 0;i < nums;++i)
+        {
+            workers_.emplace_back([this]
+            {
+                while(true)
+                {
                     Task task;
                     {
-                        std::unique_lock<std::mutex> lock(mutex_);
-                        cond_.wait(lock, [this] {
-                            return stop_ || !tasks_.empty();
+                        std::unique_lock<std::mutex>lock(mutex_);
+                        cond_.wait(lock , [this]
+                        {
+                            return symbol_ || !tasks_.empty();
                         });
-                        if (stop_ && tasks_.empty()) return;
+                        if(symbol_ && tasks_.empty()) return;
                         task = std::move(tasks_.front());
                         tasks_.pop();
                     }
@@ -139,136 +162,143 @@ public:
         }
     }
 
-    ~ThreadPool() {
+    ~threadPool()
+    {
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            stop_ = true;
+            symbol_ = true;
         }
         cond_.notify_all();
-        for (auto& w : workers_) {
-            if (w.joinable()) w.join();
+        for(auto& w : workers_)
+        {
+            if(w.joinable()) w.join();
         }
     }
 
-    void submit(Task task) {
+    void subMit(Task task)
+    {
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            tasks_.emplace(std::move(task));
+            tasks_.push(std::move(task));
         }
         cond_.notify_one();
     }
-
-private:
-    std::vector<std::thread>       workers_;
-    std::queue<Task>               tasks_;
-    std::mutex                     mutex_;
-    std::condition_variable        cond_;
-    bool                           stop_;
 };
 
-// ============== HTTP 处理 ==============
+std::string toLower(const std::string& request)
+{
+    std::string req = request;
+    std::transform(req.begin() , req.end() , req.begin() , [](unsigned char c){return std::tolower(c);});
+    return req;
+}
 
 bool wantKeepAlive(const std::string& request) {
-    bool isHttp11 = request.find("HTTP/1.1") != std::string::npos;
-    bool hasClose = request.find("Connection: close")  != std::string::npos ||
-                    request.find("Connection: Close")  != std::string::npos;
+    std::string req = toLower(request);
+    bool isHttp11 = req.find("http/1.1") != std::string::npos;
+    bool hasClose = req.find("connection: close")  != std::string::npos;
+
     if (isHttp11) return !hasClose;
-    return request.find("Connection: keep-alive") != std::string::npos ||
-           request.find("Connection: Keep-Alive") != std::string::npos;
+    return req.find("connection: keep-alive") != std::string::npos;
 }
 
 std::atomic<int> g_requestCount{0};
 
-void handleClient(int epFd, int clientFd) {
-    char buf[4096];
+void handleClient(int epFd , int clientFd)
+{
+    char buf[4096] = {0};
     std::string request;
-
-    while (true) {
-        ssize_t n = recv(clientFd, buf, sizeof(buf), 0);
-        if (n > 0) {
-            request.append(buf, n);
-            if (request.find("\r\n\r\n") != std::string::npos) break;
-        } else if (n == 0) {
-            close(clientFd);
-            g_timer.remove(clientFd);
-            return;
-        } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            close(clientFd);
-            g_timer.remove(clientFd);
-            return;
-        }
-    }
-
-    // 请求头不完整 → 刷新超时，重置 oneshot 等下次数据
-    if (request.find("\r\n\r\n") == std::string::npos) {
-        g_timer.refresh(clientFd, TIMEOUT_SEC);
-        resetEpollFd(epFd, clientFd);
-        return;
-    }
-
-    // ★ 有活动，刷新超时
-    g_timer.refresh(clientFd, TIMEOUT_SEC);
-    g_requestCount++;
-    bool keepAlive = wantKeepAlive(request);
-
-    std::string body = "Hello from v7!\n"
-                       "Request #" + std::to_string(g_requestCount.load()) + "\n"
-                       "Keep-Alive: " + (keepAlive ? "yes" : "no") + "\n";
-    std::string response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "Content-Length: " + std::to_string(body.size()) + "\r\n"
-        "Connection: " + std::string(keepAlive ? "keep-alive" : "close") + "\r\n"
-        "\r\n" + body;
-
-    send(clientFd, response.data(), response.size(), 0);
-
-    if (keepAlive) {
-        resetEpollFd(epFd, clientFd);
-        g_timer.refresh(clientFd, TIMEOUT_SEC);  // ★ 长连接也刷新
-    } else {
+    while(true){
+    ssize_t n = recv(clientFd , buf , sizeof(buf)-1 , 0);
+    if(n > 0)
+    {
+        request.append(buf , n);
+        if(request.find("\r\n\r\n") != std::string::npos) break;
+    }else if(n == 0)
+    {
         close(clientFd);
-        g_timer.remove(clientFd);
+        g_timer.reMove(clientFd);
+        return;
+    }else
+    {
+        if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+        close(clientFd);
+        g_timer.reMove(clientFd);
+        return;
     }
 }
 
-// ============== 主函数 ==============
+    if(request.find("\r\n\r\n") == std::string::npos)
+    {
+        reSetEpollFd(epFd , clientFd);
+        g_timer.reFresh(clientFd , TIMEOUT_SEC);
+        return;
+    }
+
+    g_timer.reFresh(clientFd , TIMEOUT_SEC);
+    g_requestCount++;
+    bool keepAlive = wantKeepAlive(request);
+
+    std::string body = "Hello from v5!\n"
+                        "Request#" + std::to_string(g_requestCount.load()) + "\n"
+                        "Keep-Alive:" + (keepAlive ? "Yes" : "No") + "\n";
+    std::string response = "HTTP/1.1 200 OK\r\n"
+                            "Content-type: text/plain; charset = utf-8\r\n"
+                            "Content-length: " + std::to_string(body.size()) + "\r\n"
+                            "Connection: " + std::string(keepAlive ? "keep-alive" : "close") + "\r\n"
+                            "\r\n" + body;
+    if(send(clientFd , response.data() , response.size() , 0) < 0)
+    {
+        perror("send error!");
+        return;
+    }
+
+    if(keepAlive)
+    {
+        reSetEpollFd(epFd , clientFd);
+        g_timer.reFresh(clientFd , TIMEOUT_SEC);
+    }else
+    {
+        close(clientFd);
+        g_timer.reMove(clientFd);
+    }
+}
+
 
 int main() {
     int listenFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenFd < 0) { perror("socket"); return 1; }
+    if (listenFd < 0) { perror("create socket error!"); return 1; }
 
     int opt = 1;
     setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(8080);
+
     if (bind(listenFd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind"); return 1;
+        perror("bind error!"); return 1;
     }
     if (listen(listenFd, SOMAXCONN) < 0) {
-        perror("listen"); return 1;
+        perror("listen error!"); return 1;
     }
 
     setNonBlocking(listenFd);
-    std::cout << "Server v7 (Reactor + Keep-Alive + Timer) on :8080\n"
-              << "Timeout: " << TIMEOUT_SEC << "s idle → close\n";
+    std::cout << "Server v5 (Reactor + Keep-Alive + Timer) on :8080\n"
+    << "Timeout: " << TIMEOUT_SEC << "s idle → close\n";
 
-    ThreadPool pool(4);
+    threadPool pool(4);
     int epFd = epoll_create1(0);
 
     epoll_event ev{};
-    ev.events  = EPOLLIN;
+    ev.events = EPOLLIN;
     ev.data.fd = listenFd;
-    epoll_ctl(epFd, EPOLL_CTL_ADD, listenFd, &ev);
+    epoll_ctl(epFd , EPOLL_CTL_ADD , listenFd , &ev);
 
     epoll_event events[128];
-    for (;;) {
-        // ★ 核心：timeout = 最近过期连接的剩余毫秒，不再无限等待
-        int timeout = g_timer.nextTimeoutMs();
+    while(true)
+    {
+        int timeout = g_timer.nextTimeOutMs(); //timeout = 最近过期连接的剩余毫秒，不再无限等待
         int nReady = epoll_wait(epFd, events, 128, timeout);
         if (nReady < 0) {
             if (errno == EINTR) continue;
@@ -284,19 +314,22 @@ int main() {
                     sockaddr_in clientAddr{};
                     socklen_t addrLen = sizeof(clientAddr);
                     int clientFd = accept(listenFd, (sockaddr*)&clientAddr, &addrLen);
-                    if (clientFd < 0) break;
+                    if (clientFd < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        perror("accept error!");
+                        break;
+                    }
                     setNonBlocking(clientFd);
                     addEpollFd(epFd, clientFd);
-                    // ★ 新连接注册定时器
-                    g_timer.refresh(clientFd, TIMEOUT_SEC);
+                    g_timer.reFresh(clientFd, TIMEOUT_SEC);//新连接注册定时器
                 }
             } else {
-                pool.submit([epFd, fd] { handleClient(epFd, fd); });
+                pool.subMit([epFd, fd] { handleClient(epFd, fd); });
             }
         }
 
-        // 2. ★ 核心：清理超时连接
-        std::vector<int> expired = g_timer.tick();
+        std::vector<int> expired = g_timer.tick();//清理超时连接
         for (int fd : expired) {
             epoll_ctl(epFd, EPOLL_CTL_DEL, fd, nullptr);
             close(fd);

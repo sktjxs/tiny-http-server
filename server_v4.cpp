@@ -134,7 +134,7 @@ std::string toLoer(const std::string& request)
 bool keepAlive(const std::string& request)
 {
     std::string req = toLoer(request);
-    bool isHttp11 = req.find("HTTP/1.1") != std::string::npos;
+    bool isHttp11 = req.find("http/1.1") != std::string::npos;
     bool Close = req.find("connection close") != std::string::npos;
     if(isHttp11)
     {

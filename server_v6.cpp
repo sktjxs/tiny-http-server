@@ -1,4 +1,4 @@
-// server_v8.cpp
+// server_v6.cpp
 // 主从 Reactor 模型（one loop per thread，muduo 风格）
 //
 // 架构：
@@ -7,7 +7,7 @@
 //     - eventfd 就绪 → 从队列取新 fd，加入自己的 epoll
 //     - client fd 就绪 → 直接 recv/parse/send（本线程内，无锁无竞争）
 //
-// 相比 v7 的核心改进：
+// 相比 v5 的核心改进：
 //   1. 没有 task queue 锁竞争 —— 每个 fd 固定在一个子线程
 //   2. 不需要 EPOLLONESHOT —— 同一 fd 只有一个线程操作
 //   3. 定时器无锁 —— 每个子线程有自己的定时器
