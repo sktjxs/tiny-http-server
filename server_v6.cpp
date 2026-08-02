@@ -35,293 +35,323 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <algorithm>
 
-using Clock     = std::chrono::steady_clock;
+using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 
 constexpr int NUM_SUBREACTORS = 4;
-constexpr int TIMEOUT_SEC     = 60;
+constexpr int TIMEOUT_SEC = 5;
 
-// ============== 工具函数 ==============
+
 
 int setNonBlocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    int g_flags = fcntl(fd, F_GETFL, 0);
+    if (g_flags == -1){
+        perror("F_GETFL error!");
+        return -1;
+    }
+    int s_flags =  fcntl(fd, F_SETFL, g_flags | O_NONBLOCK);
+    if(s_flags < 0)
+    {
+        perror("F_SETFL error!");
+        return -1;
+    }
+    return s_flags;
+}
+
+std::string toLower(const std::string& request)
+{
+    std::string req = request;
+    std::transform(req.begin(),req.end(),req.begin(),[](unsigned char c){return std::tolower(c);});
+    return req;
 }
 
 bool wantKeepAlive(const std::string& request) {
-    bool isHttp11 = request.find("HTTP/1.1") != std::string::npos;
-    bool hasClose = request.find("Connection: close")  != std::string::npos ||
-                    request.find("Connection: Close")  != std::string::npos;
+    std::string req = toLower(request);
+    bool isHttp11 = req.find("http/1.1") != std::string::npos;
+    bool hasClose = req.find("connection: close")  != std::string::npos;
     if (isHttp11) return !hasClose;
-    return request.find("Connection: keep-alive") != std::string::npos ||
-           request.find("Connection: Keep-Alive") != std::string::npos;
+    return req.find("connection: keep-alive") != std::string::npos;
 }
 
-// ============== SubReactor（子线程事件循环） ==============
-
-class SubReactor {
+class subReactor {
+private:
+    int id_;
+    int epFd_;
+    int eventFd_;
+    bool running_;
+    std::queue<int> pendingFds_;
+    std::mutex mutex_;
+    std::thread loopThread_;
+    std::unordered_map<int , TimePoint> timers_;
+    std::atomic<int> requestCount_{0};
 public:
-    explicit SubReactor(int id) : id_(id), running_(true) {
-        epFd_    = epoll_create1(0);
-        eventFd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-
-        // eventfd 加入 epoll，用于接收主线程的唤醒通知
+   explicit subReactor(int id) : id_(id) , running_(true)
+   {
+        epFd_ = epoll_create1(0);
+        eventFd_ = eventfd(0 , EFD_NONBLOCK | EFD_CLOEXEC);
         epoll_event ev{};
-        ev.events  = EPOLLIN;
         ev.data.fd = eventFd_;
-        epoll_ctl(epFd_, EPOLL_CTL_ADD, eventFd_, &ev);
-
-        // 启动事件循环线程
-        loopThread_ = std::thread(&SubReactor::loop, this);
-    }
-
-    ~SubReactor() {
+        ev.events = EPOLLIN;
+        epoll_ctl(epFd_ , EPOLL_CTL_ADD , eventFd_ , &ev);
+        loopThread_ = std::thread(&subReactor::loop , this);
+   } 
+   ~subReactor()
+   {
         running_ = false;
-        wakeUp();                          // 唤醒子线程让它退出
-        if (loopThread_.joinable()) loopThread_.join();
+        wakeUp();
+        if(loopThread_.joinable()) loopThread_.join();
         close(epFd_);
         close(eventFd_);
-    }
+   }
 
-    // 主线程调用：把新连接的 fd 分配给这个 sub reactor
-    void dispatch(int fd) {
+   void disPatch(int fd)
+   {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pendingFds_.push(fd);
         }
-        wakeUp();  // 写 eventfd 唤醒子线程
-    }
+        wakeUp();
+   }
 
-private:
-    int  id_;
-    int  epFd_;       // 本线程专属的 epoll
-    int  eventFd_;    // 跨线程唤醒机制
-    bool running_;
-
-    std::queue<int> pendingFds_;  // 主线程 → 子线程的待处理 fd 队列
-    std::mutex      mutex_;       // 只保护 pendingFds_
-    std::thread     loopThread_;
-
-    std::unordered_map<int, TimePoint> timers_;  // 本线程定时器（无需加锁）
-    std::atomic<int> requestCount_{0};
-
-    // 写 eventfd 唤醒子线程
-    void wakeUp() {
+   void wakeUp()
+   {
         uint64_t one = 1;
-        write(eventFd_, &one, sizeof(one));
-    }
+        write(eventFd_ , &one , sizeof(one));
+   }
 
-    // 处理主线程分配过来的新 fd（在子线程中执行）
-    void processPending() {
+   void processPending()
+   {
         std::queue<int> local;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            std::swap(local, pendingFds_);
+            std::swap(local , pendingFds_);
         }
-        while (!local.empty()) {
+        while(!local.empty())
+        {
             int fd = local.front();
             local.pop();
-
-            // ★ 注意：不需要 EPOLLONESHOT！
-            // 这个 fd 只在本线程的 epoll 里，没有其他线程会碰它
             epoll_event ev{};
-            ev.events  = EPOLLIN;
             ev.data.fd = fd;
-            epoll_ctl(epFd_, EPOLL_CTL_ADD, fd, &ev);
-
+            ev.events = EPOLLIN;
+            epoll_ctl(epFd_ , EPOLL_CTL_ADD , fd , &ev);
             timers_[fd] = Clock::now() + std::chrono::seconds(TIMEOUT_SEC);
         }
-    }
+   }
 
-    // 处理 client fd 的数据（在子线程中执行，无锁）
-    void handleClient(int fd) {
+   void handleClient(int fd)
+   {
         char buf[4096];
         std::string request;
-
-        while (true) {
-            ssize_t n = recv(fd, buf, sizeof(buf), 0);
-            if (n > 0) {
-                request.append(buf, n);
-                if (request.find("\r\n\r\n") != std::string::npos) break;
-            } else if (n == 0) {
+        while(true)
+        {
+            ssize_t n = recv(fd , buf , sizeof(buf)-1 , 0);
+            if(n > 0)
+            {
+                request.append(buf , n);
+                if(request.find("\r\n\r\n") != std::string::npos) break;
+            }else if(n == 0)
+            {
                 closeClient(fd);
                 return;
-            } else {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            }else
+            {
+                if(errno == EAGAIN || errno == EWOULDBLOCK) break;
                 closeClient(fd);
                 return;
             }
         }
-
-        // 请求头不完整：刷新超时，等下次数据到达
-        if (request.find("\r\n\r\n") == std::string::npos) {
+        if(request.find("\r\n\r\n") == std::string::npos)
+        {
             timers_[fd] = Clock::now() + std::chrono::seconds(TIMEOUT_SEC);
-            return;  // fd 留在 epoll 里，下次有数据自动触发
+            return;
         }
 
         timers_[fd] = Clock::now() + std::chrono::seconds(TIMEOUT_SEC);
         requestCount_++;
         bool keepAlive = wantKeepAlive(request);
 
-        std::string body = "Hello from sub-reactor " + std::to_string(id_) + "!\n"
-                           "Request #" + std::to_string(requestCount_.load()) + "\n"
-                           "Keep-Alive: " + (keepAlive ? "yes" : "no") + "\n";
-        std::string response =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain; charset=utf-8\r\n"
-            "Content-Length: " + std::to_string(body.size()) + "\r\n"
-            "Connection: " + std::string(keepAlive ? "keep-alive" : "close") + "\r\n"
-            "\r\n" + body;
+        std::string body = "Hello from subReactor!" + std::to_string(id_) + "\n"
+                            "Request#" + std::to_string(requestCount_.load()) + "\n"
+                            "Keep-Alive: " + (keepAlive ? "yes" : "no") + "\n";
 
-        send(fd, response.data(), response.size(), 0);
+        std::string response = "HTTP/1.1 200 OK\r\n"
+                                "Content-type: text/plain; charset=utf-8\r\n"
+                                "Content-length: " + std::to_string(body.size()) + "\r\n"
+                                "Connection: " + std::string(keepAlive ? "keepalive" : "close") + "\r\n"
+                                "\r\n" + body;
+        if(send(fd , response.data() , response.size() , 0) < 0)
+        {
+            perror("send error!");
+            closeClient(fd);
+            return;
+        }
 
-        if (!keepAlive) {
+        if(!keepAlive)
+        {
             closeClient(fd);
         }
-        // ★ keep-alive：什么都不做！fd 留在 epoll 里，不需要 MOD 重置
-        // 这就是 one loop per thread 的优势——没有 oneshot 要重置
     }
 
-    void closeClient(int fd) {
-        epoll_ctl(epFd_, EPOLL_CTL_DEL, fd, nullptr);
+    void closeClient(int fd)
+    {
+        epoll_ctl(epFd_ , EPOLL_CTL_DEL , fd , nullptr);
         close(fd);
         timers_.erase(fd);
     }
-
-    // 定时器：返回最近过期的剩余毫秒（给 epoll_wait 当 timeout）
-    int nextTimeoutMs() {
-        if (timers_.empty()) return -1;
-        TimePoint earliest = TimePoint::max();
-        for (auto& [fd, expire] : timers_) {
-            if (expire < earliest) earliest = expire;
+   
+   int nextTimeOutMs()
+   {
+        if(timers_.empty()) return -1;
+        TimePoint earlist = TimePoint::max();
+        for(auto& [fd , expire] : timers_)
+        {
+            if(expire < earlist)
+            {
+                earlist = expire;
+            }
         }
         int ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            earliest - Clock::now()
-        ).count();
-        return ms > 0 ? ms : 0;
-    }
+            earlist - Clock::now()).count();
+        return ms>0 ? ms : 0;
+   } 
 
-    // 定时器：清理超时连接
-    void tick() {
+   void tick()
+   {
         auto now = Clock::now();
         std::vector<int> expired;
-        for (auto it = timers_.begin(); it != timers_.end(); ) {
-            if (it->second <= now) {
+        for(auto it = timers_.begin();it != timers_.end();)
+        {
+            if(it->second <= now)
+            {
                 expired.push_back(it->first);
                 it = timers_.erase(it);
-            } else {
+            }else
+            {
                 ++it;
             }
         }
-        for (int fd : expired) {
-            epoll_ctl(epFd_, EPOLL_CTL_DEL, fd, nullptr);
-            close(fd);
-            std::cout << "[sub " << id_ << "] timeout closed fd " << fd << "\n";
+        for(int fd : expired)
+        {
+            closeClient(fd);
+            std::cout<<"[sub"<<id_<<"]timeout closed fd"<<fd<<"\n";
+            //std::cout<<"timeout[fd] = "<<fd<<std::endl;
         }
-    }
+   }
 
-    // 子线程事件循环
-    void loop() {
-        epoll_event events[128];
-        while (running_) {
-            int timeout = nextTimeoutMs();
-            int n = epoll_wait(epFd_, events, 128, timeout);
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                perror("epoll_wait");
-                break;
-            }
-
-            for (int i = 0; i < n; ++i) {
-                int fd = events[i].data.fd;
-
-                if (fd == eventFd_) {
-                    // 主线程唤醒：取出新分配的 fd，加入自己的 epoll
-                    uint64_t count;
-                    read(eventFd_, &count, sizeof(count));
-                    processPending();
-                } else {
-                    // client fd 就绪：在本线程直接处理（无锁）
-                    handleClient(fd);
+        void loop()
+        {
+            epoll_event events[128];
+            while(running_)
+            {
+                int timeOut = nextTimeOutMs();
+                int n = epoll_wait(epFd_ , events , 128 , timeOut);
+                if(n < 0)
+                {
+                    if(errno == EINTR) continue;
+                    perror("epoll wait");
+                    break;
                 }
+                for(int i = 0;i < n;++i)
+                {
+                    int fd = events[i].data.fd;
+                    if(fd == eventFd_)
+                    {
+                        uint64_t count;
+                        if(read(eventFd_ , &count , sizeof(count)) < 0) {
+                            if(!(errno == EAGAIN || errno == EWOULDBLOCK)) perror("recv error!");
+                        }
+                        processPending();
+                    }else
+                    {
+                        handleClient(fd);
+                    }
+                }
+                tick();
             }
-
-            // 清理超时连接
-            tick();
         }
-    }
 };
 
-// ============== 主函数（main Reactor） ==============
-
-int main() {
-    int listenFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenFd < 0) { perror("socket"); return 1; }
+int main()
+{
+    int listenFd = socket(AF_INET , SOCK_STREAM , 0);
+    if(listenFd < 0)
+    {
+        perror("create listenFd error!");
+        return 1;
+    }
 
     int opt = 1;
-    setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(listenFd , SOL_SOCKET , SO_REUSEADDR , &opt , sizeof(opt));
 
     sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(8080);
-    if (bind(listenFd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind"); return 1;
+
+    if(bind(listenFd , (sockaddr*)& addr , sizeof(addr)) < 0)
+    {
+        perror("bind listenFd error!");
+        return 1;
     }
-    if (listen(listenFd, SOMAXCONN) < 0) {
-        perror("listen"); return 1;
+
+    if(listen(listenFd , SOMAXCONN) < 0)
+    {
+        perror("listen error!");
+        return 1;
     }
 
     setNonBlocking(listenFd);
-    std::cout << "Server v8 (Main-Sub Reactor, " << NUM_SUBREACTORS
-              << " sub reactors) on :8080\n";
+    std::cout << "Server v6 (Main-Sub Reactor, " << NUM_SUBREACTORS<< " sub reactors) on :8080\n";
 
-    // 创建 sub reactors（每个会启动一个事件循环线程）
-    std::vector<std::unique_ptr<SubReactor>> subReactors;
-    for (int i = 0; i < NUM_SUBREACTORS; ++i) {
-        subReactors.push_back(std::make_unique<SubReactor>(i));
+    std::vector<std::unique_ptr<subReactor>> subReactors;
+    for(int i = 0;i < NUM_SUBREACTORS;++i)
+    {
+        subReactors.push_back(std::make_unique<subReactor>(i));
     }
 
-    // 主线程 epoll，只监听 listen fd（不管 client fd）
     int epFd = epoll_create1(0);
     epoll_event ev{};
-    ev.events  = EPOLLIN;
     ev.data.fd = listenFd;
-    epoll_ctl(epFd, EPOLL_CTL_ADD, listenFd, &ev);
+    ev.events = EPOLLIN;
+    epoll_ctl(epFd , EPOLL_CTL_ADD , listenFd , &ev);
 
     epoll_event events[128];
-    int roundRobin = 0;  // 轮询计数器
+    int roundRobin = 0;
 
-    // 主线程事件循环：只做 accept
-    for (;;) {
-        int n = epoll_wait(epFd, events, 128, -1);  // 主线程无限等待
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            perror("epoll_wait");
+    while(true)
+    {
+        int n = epoll_wait(epFd , events , 128 , -1);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            perror("epoll_wait!");
             break;
         }
 
-        for (int i = 0; i < n; ++i) {
-            if (events[i].data.fd == listenFd) {
-                // accept 所有待处理连接
-                while (true) {
+        for(int i = 0;i < n ;++i)
+        {
+            if(events[i].data.fd == listenFd)
+            {
+                while(true)
+                {
                     sockaddr_in clientAddr{};
                     socklen_t addrLen = sizeof(clientAddr);
-                    int clientFd = accept(listenFd, (sockaddr*)&clientAddr, &addrLen);
-                    if (clientFd < 0) break;
-
+                    int clientFd = accept(listenFd , (sockaddr*)&clientAddr , &addrLen);
+                    if(clientFd < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        perror("accept error!");
+                        break;
+                    }
                     setNonBlocking(clientFd);
-                    // ★ 轮询分配给 sub reactor
-                    subReactors[roundRobin % NUM_SUBREACTORS]->dispatch(clientFd);
-                    roundRobin++;
+                    subReactors[roundRobin % NUM_SUBREACTORS]->disPatch(clientFd);
+                    ++roundRobin;
                 }
             }
         }
     }
-
     close(listenFd);
     close(epFd);
-    return 0;
 }

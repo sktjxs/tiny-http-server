@@ -12,8 +12,8 @@
 
 //constexpr 让编译器在编译阶段就把值算好，运行时零开销，同时保留类型安全。
 // 凡是"编译期就能确定"的常量、函数，都优先用 constexpr 而非 const 或 #define。
-
-
+//std::chrono::system_clock 系统时钟，可被修改
+//std::chrono::high_resolution_clock 高精度时钟，本质上是其他两个时钟的typedf
 
 #include <iostream>
 #include <cstring>
@@ -36,11 +36,11 @@
 #include <string>
 #include <algorithm>
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = Clock::time_point;
+using Clock = std::chrono::steady_clock;//给单调递增时钟起一个别名
+using TimePoint = Clock::time_point;//某个时间点起一个别名
 
-
-int setNonBlocking(int fd) {
+int setNonBlocking(int fd)  //将文件描述符设置为非阻塞态，防止线程阻塞
+ {
    int g_flag = fcntl(fd , F_GETFL , 0);
    if(g_flag < 0)
    {
@@ -56,14 +56,16 @@ int setNonBlocking(int fd) {
    return s_flag;
 }
 
-void addEpollFd(int epFd, int fd) {
+void addEpollFd(int epFd, int fd) // 监听文件描述符
+ {
     epoll_event ev{};
     ev.data.fd = fd;
     ev.events = EPOLLIN | EPOLLONESHOT;
     epoll_ctl(epFd , EPOLL_CTL_ADD , fd , &ev);
 }
 
-void reSetEpollFd(int epFd, int fd) {
+void reSetEpollFd(int epFd, int fd) // 重新监听文件描述符
+ {
     epoll_event ev{};
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.fd = fd;
@@ -102,7 +104,7 @@ public:
         return ms > 0 ? ms : 0;
     }
 
-    std::vector<int> tick()
+    std::vector<int> tick() // 清除过期连接
     {
         std::vector<int> expired;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -124,7 +126,6 @@ public:
 
 timeManager g_timer; // 全局定时器
 constexpr int TIMEOUT_SEC = 5;// 连接超时时间（测试时可改小到 5）
-
 
 using Task = std::function<void()>;
 
