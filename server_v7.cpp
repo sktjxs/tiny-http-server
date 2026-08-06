@@ -1,45 +1,28 @@
-// server_v7.cpp
-// 主从 Reactor + 异步日志（双缓冲，muduo 风格）
-//
-// vs v6 新增：
-//   AsyncLogger  - 后台线程 + 双缓冲，前端 append 近零阻塞
-//   FixedBuffer  - 4MB 固定缓冲区
-//   Logger + 宏  - LOG_INFO / LOG_ERROR，格式化时间/级别/tid
-//
-// 双缓冲原理：
-//   前端写 currentBuffer_，满了 swap 到 buffers_，唤醒后台
-//   后台把 buffers_ swap 出来逐个写文件，同时前端拿到新 buffer 继续写
-//   两个 buffer 交替使用，前端几乎不阻塞
-//
-// 编译: g++ -o server_v7 server_v7.cpp -std=c++17 -pthread
-// 测试: curl http://localhost:8080 ; tail -f server.log
-
-#include <iostream>
-#include <cstring>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cerrno>
-#include <atomic>
-#include <chrono>
-#include <unordered_map>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
-#include <queue>
-#include <functional>
-#include <vector>
-#include <string>
-#include <memory>
-#include <sstream>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <cstdio>
-#include <ctime>
-#include <sys/syscall.h>
-#include <algorithm>
+#include<iostream>
+#include<cstring>
+#include<unistd.h>
+#include<fcntl.h>
+#include<cerrno>
+#include<atomic>
+#include<chrono>
+#include<unordered_map>
+#include<mutex>
+#include<condition_variable>
+#include<thread>
+#include<queue>
+#include<functional>
+#include<vector>
+#include<string>
+#include<memory>
+#include<sstream>
+#include<sys/epoll.h>
+#include<sys/eventfd.h>
+#include<sys/socket.h>
+#include<netinet/in.h>
+#include<arpa/inet.h>
+#include<cstdio>
+#include<ctime>
+#include<sys/syscall.h>
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
@@ -52,12 +35,12 @@ int setNonBlocking(int fd) {
     return s_flags;
 }
 
-// 获取内核线程 ID 32位系统pid_t 是int 64 是long
+//获取内核线程ID
 pid_t gettid_() {
     return static_cast<pid_t>(::syscall(SYS_gettid));//static_cast 显示转换 ::表示从全局作用域找，避免调用其他库函数
 }
 
-// 格式化时间戳：20260726 22:57:47.123456
+//格式化时间戳
 std::string formatTime() {
     using namespace std::chrono;
     auto now = system_clock::now();//获取系统时间
@@ -72,7 +55,7 @@ std::string formatTime() {
     return buf;
 }
 
-constexpr int BUFFER_SIZE = 4 * 1024 * 1024;  // 4MB , 固定缓冲区
+constexpr int BUFFER_SIZE = 4 * 1024 * 1024;  //固定缓冲区
 
 class FixedBuffer {
 private:
@@ -116,14 +99,12 @@ private:
     BufferPtr nextBuffer_;  //备用
     BufferVector buffers_;  //待写盘队列
 
-    // 后台线程：批量写盘
     void threadFunc() {
-        // 打开或创建日志文件（'e' = O_CLOEXEC，防止 fork 后子进程持有）
         FILE* fp = fopen(basename_.c_str(), "ae");
         if (!fp) { perror("fopen log"); abort(); }
-        setvbuf(fp, nullptr, _IONBF, 0);  // 关闭用户态缓冲，直接写内核
+        setvbuf(fp, nullptr, _IONBF, 0);  //关闭用户态缓冲，直接写内核
 
-        // 两个备用 buffer，循环复用（避免每次 new/delete）
+        //两个备用buffer，循环复用
         BufferPtr newBuffer1(new FixedBuffer);
         BufferPtr newBuffer2(new FixedBuffer);
         BufferVector buffersToWrite;
@@ -137,25 +118,23 @@ private:
                     cond_.wait_for(lock,
                         std::chrono::seconds(flushInterval_));
                 }
-                // 无论是否超时，都把 currentBuffer_ 也交出去
+                //无论是否超时，都把 currentBuffer_ 也交出去
                 buffers_.push_back(std::move(currentBuffer_));
-                currentBuffer_ = std::move(newBuffer1);  // 顶上
-                buffersToWrite.swap(buffers_);           // O(1) 交换！
+                currentBuffer_ = std::move(newBuffer1); 
+                buffersToWrite.swap(buffers_);          
                 if (!nextBuffer_) {
-                    nextBuffer_ = std::move(newBuffer2);  // 补充备用
+                    nextBuffer_ = std::move(newBuffer2); 
                 }
-            }  // ← 解锁！前端可以继续 append
+            }  //解锁后前端才可以继续写
 
-            // 锁外批量写盘
-            // 安全阀：如果前端写太快积压了太多 buffer，丢弃并告警
+            //锁外批量写盘 如果前端写太快积压了太多buffer，丢弃并警告
             if (buffersToWrite.size() > 25) {
                 char buf[256];
                 //snprintf 安全格式化字符串函数
                 snprintf(buf, sizeof(buf),
                     "Dropped %zu buffers, logging too fast!\n",
                     buffersToWrite.size() - 2);
-                buffersToWrite.erase(buffersToWrite.begin() + 2,
-                                     buffersToWrite.end());
+                buffersToWrite.erase(buffersToWrite.begin() + 2, buffersToWrite.end());
                 buffersToWrite[0]->append(buf, strlen(buf));
             }
 
@@ -164,8 +143,8 @@ private:
             }
             fflush(fp);//强制将用户态缓冲区刷新到内核页缓存
 
-            // 回收 buffer：仅重置读写位置，复用已有内存，不重新分配
-            // 取前两个作为下一轮的 newBuffer1/newBuffer2，其余析构（极端积压时才发生）
+            //回收 buffer：仅重置读写位置 不重新分配
+            //取前两个作为下一轮的 newBuffer1/newBuffer2
             size_t idx = 0;
             for (auto& buf : buffersToWrite) {
                 buf->reset();
@@ -176,14 +155,14 @@ private:
                 }
                 ++idx;
             }
-            // 若因极端情况 newBuffer1/2 仍为空（不应发生），兜底分配
+            //若因极端情况 newBuffer1/2 仍为空，兜底分配
             if (!newBuffer1) newBuffer1.reset(new FixedBuffer);
             if (!newBuffer2) newBuffer2.reset(new FixedBuffer);
-            //销毁所有 shared_ptr（触发引用计数递减），并将 vector 置为空状态以备下一轮 swap 复用
+            //销毁所有shared_ptr 并将vector置为空状态以备下一轮swap复用
             buffersToWrite.clear();
         }
 
-        // 退出前 flush 残留
+        //退出前 flush 残留
         fflush(fp);
         fclose(fp);
     }
@@ -210,33 +189,27 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
-    // 前端调用：追加一条日志
-    // 常见路径：currentBuffer_ 有空间，memcpy 后返回，不唤醒后台
-    // 满了才 swap + notify，短暂加锁
     void append(const char* line, int len) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (currentBuffer_->avail() > len) {
-            currentBuffer_->append(line, len);  // 99% 走这里
+            currentBuffer_->append(line, len);  //一般走这里
         } else {
             // currentBuffer_ 满了
             buffers_.push_back(std::move(currentBuffer_));
             if (nextBuffer_) {
-                currentBuffer_ = std::move(nextBuffer_);  // 用备用 buffer
+                currentBuffer_ = std::move(nextBuffer_);  //用备用 buffer
             } else {
-                currentBuffer_.reset(new FixedBuffer);    // 极端情况
+                currentBuffer_.reset(new FixedBuffer);    //极端情况
             }
             currentBuffer_->append(line, len);
-            cond_.notify_one();  // 唤醒后台线程写盘
+            cond_.notify_one();  //唤醒后台线程写盘
         }
     }
 };
 
-// 全局日志实例（main 里初始化）
+//全局日志实例
 AsyncLogger* g_asyncLog = nullptr;
 
-// ============== Logger 前端 ==============
-// 构造时写日志头，析构时 append 到 AsyncLogger
-// 用法：LOG_INFO << "message " << 42;
 
 class Logger {
 private:
@@ -254,7 +227,7 @@ public:
         if (g_asyncLog) {
             g_asyncLog->append(msg.data(),static_cast<int>(msg.size()));
         } else {
-            fputs(msg.c_str(), stderr);  // fputs 原样输出 stderr 标准错误
+            fputs(msg.c_str(), stderr);  //fputs原样输出 stderr标准错误
         }
     }
 
@@ -263,8 +236,6 @@ public:
 
 #define LOG_INFO  Logger("INFO ", __FILE__, __LINE__).stream()
 #define LOG_ERROR Logger("ERROR", __FILE__, __LINE__).stream()
-
-// ============== SubReactor（one loop per thread）==============
 
 class SubReactor {
 private:
@@ -276,8 +247,7 @@ private:
     std::mutex mutex_;
     std::queue<int> pendingFds_;
 
-    // 【修改点】：先定义 Timer 结构体，再声明 timer_ 变量
-    // SubReactor 内置定时器 不需要锁，单线程访问
+    //一个进程内无需加锁
     struct Timer {
         std::unordered_map<int, TimePoint> timers;
 
@@ -307,7 +277,7 @@ private:
         }
     };
 
-    Timer timer_; // 现在 Timer 已经定义过了，这里不会报错
+    Timer timer_; 
     static constexpr int TIMEOUT_SEC = 5;
 
     void wake() {
@@ -332,7 +302,7 @@ private:
                 int fd = events[i].data.fd;
 
                 if (fd == wakeFd_) {
-                    // 主线程通知：有新 fd 要加入
+                    //主线程通知：有新 fd 要加入
                     uint64_t val;
                     read(wakeFd_, &val, sizeof(val));
 
@@ -353,7 +323,7 @@ private:
                 }
             }
 
-            // 清理超时连接
+            //清理超时连接
             for (int fd : timer_.tick()) {
                 epoll_ctl(epFd_, EPOLL_CTL_DEL, fd, nullptr);
                 close(fd);
@@ -366,7 +336,7 @@ private:
 
     void addEpollFd(int fd) {
         epoll_event ev{};
-        ev.events  = EPOLLIN;  // 不需要 EPOLLONESHOT！
+        ev.events  = EPOLLIN; //有eventfd 无需EPOLLONESHOT
         ev.data.fd = fd;
         epoll_ctl(epFd_, EPOLL_CTL_ADD, fd, &ev);
     }
@@ -402,8 +372,7 @@ private:
         static std::atomic<int> reqCount{0};
         int num = ++reqCount;
 
-        std::string body = "Hello from v9!\nRequest #" +
-                           std::to_string(num) + "\n";
+        std::string body = "Hello from server!\n";
         std::string response =
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/plain\r\n"
@@ -446,7 +415,7 @@ public:
         if (loop_.joinable()) loop_.join();
     }
 
-    // 主线程调用：把新 fd 交给这个 sub reactor
+    //把参数fd放进队列
     void dispatch(int fd) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -456,17 +425,15 @@ public:
     }
 };
 
-// ============== 主函数 ==============
 
 int main() {
-    // 1. 初始化异步日志
+    //初始化异步日志
     AsyncLogger log("server.log", 3);
     g_asyncLog = &log;
     log.start();
 
-    LOG_INFO << "===== server v7 starting =====";
+    LOG_INFO << "===== server starting =====";
 
-    // 2. 创建监听 socket
     int listenFd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd < 0) {
         LOG_ERROR << "socket(): " << strerror(errno);
@@ -492,7 +459,7 @@ int main() {
     setNonBlocking(listenFd);
     LOG_INFO << "listening on :8080";
 
-    // 3. 启动 4 个 sub reactor
+    //启动4个线程
     constexpr int NUM_SUB = 4;
     std::vector<std::unique_ptr<SubReactor>> subs;
     for (int i = 0; i < NUM_SUB; ++i) {
@@ -502,7 +469,7 @@ int main() {
     }
     LOG_INFO << NUM_SUB << " sub-reactors started";
 
-    // 4. 主线程：accept + round-robin 分发
+    //主线程只负责分发
     int epFd = epoll_create1(0);
     epoll_event ev{};
     ev.events  = EPOLLIN;
@@ -514,7 +481,7 @@ int main() {
 
     LOG_INFO << "main reactor ready, waiting for connections...";
 
-    for (;;) {
+    while (true) {
         int n = epoll_wait(epFd, events, 128, -1);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -543,12 +510,12 @@ int main() {
         }
     }
 
-    // 清理
+    //清理
     for (auto& sr : subs) sr->stop();
     close(listenFd);
     close(epFd);
 
-    LOG_INFO << "===== server v7 shutdown =====";
+    LOG_INFO << "===== server shutdown =====";
     log.stop();
 
     return 0;

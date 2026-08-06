@@ -61,7 +61,6 @@ std::string route(const std::string& path) {
 
 
 int main() {
-    // 1. 创建监听 socket（和之前一样）
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) { std::cerr << "socket failed" << std::endl; return 1; }
 
@@ -80,57 +79,47 @@ int main() {
         std::cerr << "listen failed" << std::endl; return 1;
     }
 
-    // 2. 创建 epoll 实例
     int epfd = epoll_create1(0);
     if (epfd < 0) { std::cerr << "epoll_create1 failed" << std::endl; return 1; }
 
-    // 3. 把 server_fd 加入 epoll 监控，监听"可读"事件（=有新连接）
     struct epoll_event ev;
-    ev.events = EPOLLIN;       // EPOLLIN = 有数据可读（对监听 socket 来说就是新连接）
-    ev.data.fd = server_fd;    // 记住是哪个 fd
+    ev.events = EPOLLIN;       
+    ev.data.fd = server_fd;    
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
     std::cout << "Server v2 running on port 8080 (epoll, single thread)" << std::endl;
     
 
-    // 4. 事件循环：epoll_wait 阻塞等待，有事件才返回
-    struct epoll_event events[1024];// 1024 = 最大同时处理的事件数
+  
+    struct epoll_event events[1024];
     while (true) {
-        // -1 表示无限等待，直到有事件
         int n = epoll_wait(epfd, events, 1024, -1);
         if (n < 0) { std::cerr << "epoll_wait error" << std::endl; continue; }
 
-        // 遍历所有就绪的事件
         for (int i = 0; i < n; i++) {
-            int fd = events[i].data.fd;// 就绪的 fd
+            int fd = events[i].data.fd;
 
             if (fd == server_fd) {
-                // 事件来自 server_fd → 有新客户端连接
                 struct sockaddr_in client_addr;
                 socklen_t client_len = sizeof(client_addr);
                 int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
                 if (client_fd < 0) continue;
 
                 std::cout << "New connection: fd=" << client_fd << std::endl;//
-
-                // 把新连接的 client_fd 也加入 epoll 监控
                 struct epoll_event client_ev;
                 client_ev.events = EPOLLIN;
                 client_ev.data.fd = client_fd;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &client_ev);
 
             } else {
-                // 事件来自 client_fd → 有客户端发数据了
                 char buffer[4096] = {0};
                 ssize_t bytes = recv(fd, buffer, sizeof(buffer) - 1, 0);
 
                 if (bytes <= 0) {
-                    // 客户端关闭连接或出错 → 从 epoll 移除，关闭 fd
                     std::cout << "Connection closed: fd=" << fd << std::endl;
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                     close(fd);
                 } else {
-                    // 收到请求 → 解析 → 路由 → 响应
                     std::string request(buffer, bytes);
                     std::string path = parse_path(request);
                     std::cout << "Request fd=" << fd << " path=" << path << std::endl;
@@ -138,7 +127,6 @@ int main() {
                     std::string response = route(path);
                     send(fd, response.c_str(), response.size(), 0);
 
-                    // 响应完就关闭（HTTP/1.0 风格，Connection: close）
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                     close(fd);
                 }
